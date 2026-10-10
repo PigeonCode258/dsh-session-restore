@@ -20,9 +20,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - name: Environment
+        run: node -e "console.log(process.version, process.platform, process.arch)"
       # The plugin has no dependencies, so there is nothing to install.
       - name: Test
         run: node test/run.mjs
+      # Runs the same suite with POSIX path rules, so a Windows-only shadow of a
+      # platform branch is caught here instead of on the ubuntu jobs.
+      - name: Test under POSIX semantics
+        run: node test/simulate-posix/run.mjs
       - name: Reader smoke test against an empty DSH home
         run: node test/real-artifacts.mjs
         env:

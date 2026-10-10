@@ -188,19 +188,23 @@ lib/vocabulary.js The event vocabulary and format version of this build
 lib/staging.js    Upload staging and cleanup
 lib/routes.js     The three HTTP routes
 lib/client.js     Browser half (hand-written lazy-CJS bundle): sidebar entry, header trigger, import dialog
-test/             51 offline tests plus an optional real-artifact checker
+test/             52 offline tests, a cross-platform (POSIX-semantics) simulator, and an optional real-artifact checker
 ```
 
 ## Development
 
 ```bash
-node test/run.mjs              # the whole offline suite (nothing to install)
-node test/real-artifacts.mjs   # optional: validate the reader against real artifacts under $DSH_HOME/sessions
+node test/run.mjs                      # the whole offline suite (nothing to install)
+node test/simulate-posix/run.mjs       # run it again under POSIX path rules, from any host
+node test/real-artifacts.mjs           # optional: validate the reader against real artifacts under $DSH_HOME/sessions
 ```
 
 - The suite needs no dsh runtime: persistence, the attachment store, and the host HTTP connection are
   replaced by behaviour-equivalent doubles, and the browser half is loaded in `node:vm` through the
   real loader protocol and rendered branch by branch with a minimal React.
+- `test/simulate-posix/` swaps `node:path`'s absolute-path rule for the POSIX one and flips the
+  platform constant the fixtures read, so a branch that would only fail on ubuntu shows up on a
+  Windows development machine (CI runs it on every push).
 - Issues and pull requests are welcome. Please keep the "no runtime dependencies, no build step" line.
 
 ## License

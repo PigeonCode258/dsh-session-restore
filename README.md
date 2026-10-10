@@ -176,18 +176,21 @@ lib/vocabulary.js 本版本的事件词表与格式版本
 lib/staging.js    上传暂存与清理
 lib/routes.js     三个 HTTP 路由
 lib/client.js     浏览器半侧（手写 lazy-CJS bundle）：侧边栏入口 + 会话头部触发器 + 导入弹窗
-test/             51 个离线测试 + 一个可选的真实工件校验脚本
+test/             52 个离线测试 + 跨平台（POSIX 语义）模拟器 + 可选的真实工件校验脚本
 ```
 
 ## 开发
 
 ```bash
-node test/run.mjs              # 全部离线测试（无需安装任何依赖）
-node test/real-artifacts.mjs   # 可选：用本机 $DSH_HOME/sessions 下的真实工件校验读取器
+node test/run.mjs                      # 全部离线测试（无需安装任何依赖）
+node test/simulate-posix/run.mjs       # 用 POSIX 路径规则再跑一遍（Windows 上也能复现 Linux 行为）
+node test/real-artifacts.mjs           # 可选：用本机 $DSH_HOME/sessions 下的真实工件校验读取器
 ```
 
 - 测试不依赖 dsh 运行时：持久化、附件存储、宿主 HTTP 连接都用行为等价的替身；
   浏览器半侧在 `node:vm` 里按真实 loader 协议加载，并用最小 React 渲染每个分支。
+- `test/simulate-posix/` 用 loader hook 把 `node:path` 的绝对路径判定换成 POSIX 规则、把平台常量切成
+  `linux`，让"只在 ubuntu 上红"的分支在 Windows 开发机上也能提前发现（CI 每次都会跑这一遍）。
 - 欢迎 issue / PR。改动请保持「无运行时依赖、无构建步骤」这条线。
 
 ## 许可

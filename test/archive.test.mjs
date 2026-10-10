@@ -10,7 +10,7 @@ import { after, before, test } from 'node:test';
 import { zstdCompressSync } from 'node:zlib';
 import { classifyEntry, decodeLogBytes, isAbsoluteAnywhere, isUsableWorkspace, parseSessionLog, readSessionArchive } from '../lib/archive.js';
 import { ZipError, ZipFile, zstdDecompressFrames } from '../lib/zip.js';
-import { buildZip, conversationLog, event, FOREIGN_CWD, headerLine, imageBlock, logText } from './helpers.mjs';
+import { buildZip, conversationLog, event, FOREIGN_CWD, headerLine, imageBlock, logText, PLATFORM } from './helpers.mjs';
 
 /** @type {string} */
 let workspace;
@@ -156,7 +156,7 @@ test('workspace paths are portable across platforms', () => {
   assert.equal(isAbsoluteAnywhere('work/demo'), false);
   assert.equal(isAbsoluteAnywhere(''), false);
   assert.equal(isAbsoluteAnywhere(42), false);
-  assert.equal(isUsableWorkspace(FOREIGN_CWD), process.platform === 'win32');
+  assert.equal(isUsableWorkspace(FOREIGN_CWD), PLATFORM === 'win32');
   const { header, events } = conversationLog({ header: { cwd: FOREIGN_CWD } });
   const log = parseSessionLog(logText(header, events), { zipPath: 'x', legacy: false });
   assert.equal(log.header.cwd, FOREIGN_CWD, 'a foreign platform workspace still parses');

@@ -10,16 +10,23 @@
 import { crc32, deflateRawSync } from 'node:zlib';
 
 /**
+ * The platform the suite is being run *as*. `test/simulate-posix/run.mjs`
+ * overrides it so a Windows machine can exercise the POSIX branches;
+ * everywhere else it is simply the host platform.
+ */
+export const PLATFORM = process.env.DSH_SESSION_RESTORE_TEST_PLATFORM ?? process.platform;
+
+/**
  * A workspace path this platform treats as absolute, so a fixture is valid on
  * every OS the suite runs on.
  */
-export const DEMO_CWD = process.platform === 'win32' ? 'C:\\work\\demo' : '/work/demo';
+export const DEMO_CWD = PLATFORM === 'win32' ? 'C:\\work\\demo' : '/work/demo';
 
 /** A second workspace, absolute on this platform. */
-export const OTHER_CWD = process.platform === 'win32' ? 'C:\\work\\other' : '/work/other';
+export const OTHER_CWD = PLATFORM === 'win32' ? 'C:\\work\\other' : '/work/other';
 
 /** A workspace written in the other platform's convention. */
-export const FOREIGN_CWD = process.platform === 'win32' ? '/home/dev/project' : 'D:\\dev\\project';
+export const FOREIGN_CWD = PLATFORM === 'win32' ? '/home/dev/project' : 'D:\\dev\\project';
 
 /**
  * Build one ZIP archive in memory.

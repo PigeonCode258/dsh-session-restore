@@ -10,8 +10,8 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { readSessionArchive } from '../lib/archive.js';
 import { ZipFile } from '../lib/zip.js';
-import { restoreArchive } from '../lib/restore.js';
-import { buildZip, conversationLog, DEMO_CWD, event, fileBlock, FOREIGN_CWD, imageBlock, logText, OTHER_CWD } from './helpers.mjs';
+import { RestoreError, restoreArchive } from '../lib/restore.js';
+import { buildZip, conversationLog, DEMO_CWD, event, fileBlock, FOREIGN_CWD, imageBlock, logText, OTHER_CWD, PLATFORM } from './helpers.mjs';
 
 /** @type {string} */
 let workspace;
@@ -331,15 +331,21 @@ test('a workspace from another platform needs an explicit target', async () => {
   const persistence = new FakePersistence();
   try {
     // The archive parses — it is a valid absolute path somewhere — but this
-    // host cannot store it, so the log fails with an actionable message.
-    const blocked = await restoreArchive({ sessionPersistence: persistence, archive, zip }, {});
-    if (process.platform === 'win32') {
+    // host may not be able to store it. When it cannot, every log fails, and a
+    // restore that wrote nothing is a refusal: it throws with the reason rather
+    // than reporting a result nobody could use.
+    const outcome = await restoreArchive({ sessionPersistence: persistence, archive, zip }, {}).then(
+      (result) => ({ result }),
+      (error) => ({ error }),
+    );
+    if (PLATFORM === 'win32') {
       // Windows accepts both conventions, so this is the usable-workspace path.
-      assert.equal(blocked.sessions[0].status, 'restored');
+      assert.equal(outcome.result?.sessions[0].status, 'restored');
     } else {
-      assert.equal(blocked.sessions[0].status, 'failed');
-      assert.match(blocked.sessions[0].error, /choose a target workspace/u);
-      assert.ok(blocked.warnings.some((warning) => warning.includes('not an absolute path on this platform')));
+      assert.ok(outcome.error instanceof RestoreError, 'a refusal, not a result');
+      assert.match(outcome.error.message, /not an absolute path on this platform/u);
+      assert.match(outcome.error.message, /choose a target workspace/u);
+      assert.equal(persistence.sessions.size, 0, 'nothing was written');
     }
   } finally {
     await zip.close();
@@ -359,6 +365,42 @@ test('a workspace from another platform needs an explicit target', async () => {
     assert.equal(restored.sessions[0].cwd, DEMO_CWD);
   } finally {
     await retry.zip.close();
+  }
+});
+
+test('a workspace that only some logs can use is reported per session', async () => {
+  // A mixed archive is where the per-session report, rather than a refusal,
+  // has to carry the foreign workspace: the root is fine, the descendant is not.
+  const root = conversationLog();
+  const childHeader = {
+    type: 'session',
+    version: 4,
+    id: 'session-66666666-6666-4666-8666-666666666666',
+    createdAt: 1_700_000_004_000,
+    isSeeded: false,
+    delegationDepth: 1,
+    parentSession: root.header.id,
+    cwd: FOREIGN_CWD,
+  };
+  const { zip, archive } = await openArchive('mixed-cwd.zip', [
+    { name: 'session.v4.jsonl', data: logText(root.header, root.events) },
+    { name: `subagents/${childHeader.id}/session.v4.jsonl`, data: logText(childHeader, [event(0, 'turn/start', { turn: 1 })]) },
+  ]);
+  const persistence = new FakePersistence();
+  try {
+    const result = await restoreArchive({ sessionPersistence: persistence, archive, zip }, {});
+    const rootSession = result.sessions.find((session) => session.role === 'root');
+    const childSession = result.sessions.find((session) => session.role === 'subagent');
+    assert.equal(rootSession.status, 'restored');
+    if (PLATFORM === 'win32') {
+      assert.equal(childSession.status, 'restored');
+    } else {
+      assert.equal(childSession.status, 'failed');
+      assert.match(childSession.error, /choose a target workspace/u);
+      assert.ok(result.warnings.some((warning) => warning.includes('not an absolute path on this platform')));
+    }
+  } finally {
+    await zip.close();
   }
 });
 
