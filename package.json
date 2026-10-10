@@ -1,0 +1,61 @@
+{
+  "name": "dsh-session-restore",
+  "version": "0.1.0",
+  "description": "Import a Session-log ZIP exported by DeepSeek Harness and restore the conversation: the sessions come back with their identity, history, sub-sessions, and attachments, and resume where they left off.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "session",
+    "session-log",
+    "import",
+    "restore",
+    "backup"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "author": "pigeoncode258",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pigeoncode258/dsh-session-restore.git"
+  },
+  "homepage": "https://github.com/pigeoncode258/dsh-session-restore#readme",
+  "bugs": {
+    "url": "https://github.com/pigeoncode258/dsh-session-restore/issues"
+  },
+  "engines": {
+    "node": ">=22.15"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-api-session-controller"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node test/run.mjs"
+  }
+}

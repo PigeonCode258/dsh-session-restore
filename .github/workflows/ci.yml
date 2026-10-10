@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: node ${{ matrix.node }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22.x', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # The plugin has no dependencies, so there is nothing to install.
+      - name: Test
+        run: node test/run.mjs
+      - name: Reader smoke test against an empty DSH home
+        run: node test/real-artifacts.mjs
+        env:
+          DSH_HOME: ${{ runner.temp }}/dsh-home
+      - name: Check the published file list
+        run: npm pack --dry-run

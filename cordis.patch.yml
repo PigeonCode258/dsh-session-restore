@@ -1,0 +1,20 @@
+# ============================================================================
+# dsh-session-restore —— DSH bundle patch（挂载声明）
+# ============================================================================
+# DSH 启动时按 bundle 层栈叠加各插件 patch，本文件把会话归档恢复插件插入
+# Web profile：宿主半侧注册 /api/session.restore.* 路由与 /import 命令，
+# 浏览器半侧在会话头部提供“导入会话归档”入口。
+#
+# 安装方式：
+#   本地开发：  dsh plugin --profile desktop add link:<本目录绝对路径>
+#   发布之后：  dsh plugin --profile desktop add dsh-session-restore
+#
+# 可选配置（写在下面 insert 行的 config 下）：
+#   stagingTtlMs    未消费的上传归档保留时长（默认 6 小时）
+#   maxUploadBytes  单次上传归档上限（默认 2 GiB）
+#   maxEntryBytes   单个归档条目解压上限（默认 512 MiB）
+# ============================================================================
+
+- insert:
+    - id: session-restore
+      name: dsh-session-restore

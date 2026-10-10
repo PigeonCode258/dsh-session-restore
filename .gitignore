@@ -1,0 +1,21 @@
+# Dependencies (the plugin itself has none; these are only ever created by
+# installing it into a profile or by local tooling)
+node_modules/
+.pnpm-store/
+
+# Logs and local scratch
+*.log
+npm-debug.log*
+pnpm-debug.log*
+*.tgz
+
+# Editors and OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local notes that should never be published
+NOTES.local.md
+TODO.local.md
