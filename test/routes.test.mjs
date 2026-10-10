@@ -10,7 +10,7 @@ import { after, before, test } from 'node:test';
 import { registerRestoreRoutes, SESSION_RESTORE_PATHS } from '../lib/routes.js';
 import { SessionRestoreService } from '../lib/service.js';
 import { Staging } from '../lib/staging.js';
-import { buildZip, conversationLog, headerLine, logText } from './helpers.mjs';
+import { buildZip, conversationLog, DEMO_CWD, headerLine, logText } from './helpers.mjs';
 
 /** @type {string} */
 let workspace;
@@ -266,6 +266,6 @@ test('the workspace list is derived from stored Sessions', async () => {
     `http://host${SESSION_RESTORE_PATHS.preview}`,
     { method: 'POST', headers: { 'content-type': 'application/zip' }, body: zip },
   ))).json();
-  assert.deepEqual(preview.value.workspaces.map((entry) => entry.cwd), ['C:\\work\\demo']);
+  assert.deepEqual(preview.value.workspaces.map((entry) => entry.cwd), [DEMO_CWD]);
   assert.equal(preview.value.workspaces[0].sessions, 1);
 });
