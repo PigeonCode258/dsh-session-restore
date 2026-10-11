@@ -202,7 +202,7 @@ lib/vocabulary.js   本版本的事件词表与格式版本
 lib/staging.js      上传暂存与清理
 lib/routes.js       三个 HTTP 路由
 lib/client.js       浏览器半侧（手写 lazy-CJS bundle）：侧边栏入口 + 会话头部触发器 + 导入弹窗
-test/               82 个离线测试 + 跨平台（POSIX 语义）模拟器 + 可选的真实工件校验脚本
+test/               86 个离线测试 + 跨平台（POSIX 语义）模拟器 + 可选的真实工件校验脚本
 ```
 
 ## 开发

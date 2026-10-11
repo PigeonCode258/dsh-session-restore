@@ -73,10 +73,39 @@ function createSnapshotStore(initial) {
 }
 
 /**
- * Load the browser bundle and return its exports plus the captured registration.
- * @returns {Promise<{ exports: object, registrations: object[], load: (require: Function) => object }>} the loaded bundle.
+ * A minimal `document` stand-in: enough for the bundle's stylesheet injection
+ * to run and be inspected.
+ * @returns {object} the document stub.
  */
-async function loadBundle() {
+function createDocumentStub() {
+  const head = {
+    children: [],
+    appendChild: (node) => {
+      head.children.push(node);
+      return node;
+    },
+  };
+  return {
+    head,
+    styles: head.children,
+    querySelector(selector) {
+      const match = /^style\[data-plugin-css=(.*)\]$/u.exec(selector);
+      if (match === null) return null;
+      const wanted = JSON.parse(match[1]);
+      return head.children.find((node) => node.dataset.pluginCss === wanted) ?? null;
+    },
+    createElement(tagName) {
+      return { tagName, dataset: {}, textContent: '' };
+    },
+  };
+}
+
+/**
+ * Load the browser bundle and return its exports plus the captured registration.
+ * @param {object} [documentStub] - document stand-in; a fresh one by default.
+ * @returns {Promise<{ exports: object, registrations: object[], document: object, load: (require: Function) => object }>} the loaded bundle.
+ */
+async function loadBundle(documentStub = createDocumentStub()) {
   const source = await readFile(BUNDLE, 'utf8');
   const registrations = [];
   const context = {
@@ -92,6 +121,7 @@ async function loadBundle() {
     AbortController,
     URLSearchParams,
     fetch: () => Promise.reject(new Error('the bundle must use its injected fetcher')),
+    document: documentStub,
     console,
     setTimeout,
     clearTimeout,
@@ -105,6 +135,7 @@ async function loadBundle() {
   return {
     registrations,
     load,
+    document: documentStub,
     exports: load((specifier) => {
       if (specifier === 'react') return React;
       if (specifier === '@deepseek-ai/dsh-client-ui-primitives') return primitives;
@@ -116,11 +147,12 @@ async function loadBundle() {
 
 /**
  * Mount the browser half on a stand-in client context.
- * @returns {Promise<{ controller: object, entries: object[], header: object, footer: object }>} the mounted entries.
+ * @param {object} [documentStub] - document stand-in to reuse across mounts.
+ * @returns {Promise<{ controller: object, entries: object[], header: object, footer: object, document: object }>} the mounted entries.
  */
-async function mount() {
-  const loaded = await loadBundle();
-  const captured = { controller: null, entries: [] };
+async function mount(documentStub) {
+  const loaded = await loadBundle(documentStub);
+  const captured = { controller: null, entries: [], document: loaded.document };
   let pending = null;
   const ctx = {
     effect: (callback) => callback(),
@@ -500,6 +532,74 @@ test('the workspace and permission pickers render the projects, the presets, and
 
   const archiveMode = render({ cwdMode: 'archive' });
   assert.ok(textsOf(archiveMode).some((text) => text.includes('options.workspaceArchive')), 'archive mode explains what it keeps');
+});
+
+test('the dialog caps its card and hands the scroll to the content region', async () => {
+  const mounted = await mount();
+  mounted.controller.store.set({
+    ...mounted.controller.store.getSnapshot(),
+    open: true,
+    phase: 'done',
+    result: { mode: 'restore', rootId: 'session-root', sessions: [], media: { restored: 0 }, warnings: [] },
+  });
+  const rendered = mounted.footer.component(mounted.footer.props);
+  const modal = findAll(rendered, (props) => props.open === true)[0];
+  assert.equal(modal.props.className, 'ssr-dialog', 'the card carries the height cap');
+  assert.equal(modal.props.contentClassName, 'ssr-content', 'the content region carries the scroll');
+});
+
+test('the injected stylesheet caps the card and gives the region the app scrollbar', async () => {
+  const mounted = await mount();
+  assert.equal(mounted.document.styles.length, 1, 'the dialog injects exactly one stylesheet');
+  const tag = mounted.document.styles[0];
+  assert.equal(tag.dataset.pluginCss, 'dsh-session-restore/dialog.css');
+  for (const expected of [
+    'div.ssr-dialog{',
+    'max-height:100%;overflow:hidden',
+    'calc(100dvh - 2 * max(24px,var(--dsh-frame-overlay-top,24px)))',
+    'div.ssr-content{',
+    'min-height:0;overflow-y:auto',
+    'overscroll-behavior:contain',
+    '--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2)',
+  ]) {
+    assert.ok(tag.textContent.includes(expected), `expected the stylesheet to contain ${expected}`);
+  }
+  // A second mount on the same document must not append a second copy.
+  await mount(mounted.document);
+  assert.equal(mounted.document.styles.length, 1);
+});
+
+test('a large archive lists the root, every failure, and only the first sub-Sessions', async () => {
+  const mounted = await mount();
+  const children = Array.from({ length: 9 }, (_, index) => ({
+    id: `session-child-${String(index)}`,
+    originalId: `session-child-${String(index)}`,
+    role: 'subagent',
+    status: 'restored',
+    events: 3,
+  }));
+  mounted.controller.store.set({
+    ...mounted.controller.store.getSnapshot(),
+    open: true,
+    phase: 'done',
+    result: {
+      mode: 'restore',
+      rootId: 'session-root',
+      sessions: [
+        { id: 'session-root', originalId: 'session-root', role: 'root', status: 'restored', events: 7 },
+        ...children,
+        { id: 'session-broken', originalId: 'session-broken', role: 'subagent', status: 'failed', events: 0, error: 'disk full' },
+      ],
+      media: { restored: 0 },
+      warnings: [],
+    },
+  });
+  const texts = textsOf(mounted.footer.component(mounted.footer.props));
+  assert.ok(texts.some((text) => text.includes('session-child-0')));
+  assert.ok(texts.some((text) => text.includes('session-child-7')), 'the eighth sub-Session still fits');
+  assert.equal(texts.some((text) => text.includes('session-child-8')), false, 'the ninth is summarized instead');
+  assert.ok(texts.some((text) => text.includes('preview.more')), 'the hidden tail is summarized');
+  assert.ok(texts.some((text) => text.includes('disk full')), 'a refused Session is listed regardless of the limit');
 });
 
 test('the failure phase shows the reason and offers to choose again', async () => {

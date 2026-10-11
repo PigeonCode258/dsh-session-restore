@@ -21,6 +21,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The dialog scrolls and fits the window.** The card now caps itself against the modal's own padded
+  overlay box (`max-height: 100%`, plus a `dvh` fallback that subtracts the frame inset) and hands the
+  scroll to its content region through the primitive's documented `contentClassName` hook, so the
+  action row stays visible no matter how many Sessions an archive carries. The card also widens to
+  560px so 44-character Session ids stop wrapping, and a result list spells out the root Session,
+  every refusal, and the first eight sub-Sessions before summarizing the rest.
 - **The default target workspace is the invoking Session's**, not the archived one: an archive from
   another machine names a directory that means nothing here. The archived workspace is still offered
   when it exists and is usable.

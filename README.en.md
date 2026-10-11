@@ -220,7 +220,7 @@ lib/vocabulary.js The event vocabulary and format version of this build
 lib/staging.js    Upload staging and cleanup
 lib/routes.js     The three HTTP routes
 lib/client.js     Browser half (hand-written lazy-CJS bundle): sidebar entry, header trigger, import dialog
-test/             82 offline tests, a cross-platform (POSIX-semantics) simulator, and an optional real-artifact checker
+test/             86 offline tests, a cross-platform (POSIX-semantics) simulator, and an optional real-artifact checker
 ```
 
 ## Development
