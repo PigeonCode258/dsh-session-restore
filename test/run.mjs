@@ -7,6 +7,8 @@
 import './helpers.mjs';
 import './archive.test.mjs';
 import './restore.test.mjs';
+import './permissions.test.mjs';
+import './workspace.test.mjs';
 import './routes.test.mjs';
 import './client.test.mjs';
 import './plugin.test.mjs';

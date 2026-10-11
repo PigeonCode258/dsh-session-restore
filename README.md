@@ -26,7 +26,9 @@ dsh 会话日志 ZIP  ──►  preview（读出归档内容，不写入）  �
 | 真·恢复，不是重建 | 日志经 `ctx.sessionPersistence` 的写句柄逐条写入，和 dsh 自己写的会话没有区别：能列出、能打开、能续聊 |
 | 两种导入模式 | **原样恢复**（保留归档里的会话 ID 与工作区）／**作为副本**（生成新 ID，适合从别的机器导入） |
 | 冲突自动降级 | 目标机器已存在同 ID 会话时自动改用副本模式，并改写事件里对该会话 ID 的引用（含 `tool/call.arguments` 这类 JSON 文本载体） |
-| 工作区改写 | 归档里的工作区在本机不存在、或来自另一种路径风格（Windows ↔ POSIX）时，可统一恢复到指定工作区 |
+| 工作区改写 | 归档里的工作区在本机不存在、或来自另一种路径风格（Windows ↔ POSIX）时，可统一恢复到指定工作区；默认目标是当前会话所在的工作区 |
+| 归入目标项目 | 恢复后调用 `workspaceRegistry` 的 `resolveByPath` / `create` / `attachSession`，会话直接出现在所选项目下，而不是掉进 Ungrouped |
+| 权限预设归一化 | 归档带着导出机器的权限设置；按本机预设表反查后写回规范事件，避免 `workspace-write + approval: never` 这类组合在本机解析成 `custom`（也可选择沿用归档） |
 | 附件恢复 | `media/*` 图片经 `ctx.attachments.saveImage` 落库；`files/*` 文件经 `saveFileStream` 逐块落库。存储重新归一化导致 ID 变化时，日志里的引用会被同步改写 |
 | 归档严格校验 | 格式版本、事件词表、`seq` 连续性、头部字段集合、`isSeeded` 与 `session/end-seed` 标记一致性，全部在写入前检查——写入一个坏日志比拒绝它更糟 |
 | 兼容旧归档 | 0.1.x 导出的原始 `.jsonl.zstd` 工件（多帧 Zstandard 拼接）也能解出内容；世代过旧时会明确拒绝而不是误读 |
@@ -82,22 +84,29 @@ dsh plugin --profile desktop add dsh-session-restore
    是否已存在同 ID 会话、附件数量与缺失引用、以及所有非致命提示；
 3. 选项：
    - **导入方式**：原样恢复 / 作为副本；
-   - **工作区**：勾选后可填写目标工作区，把归档里的会话统一落到该目录；
+   - **工作区**：三选一 —— **归档工作区**（沿用归档里的路径）/ **已有项目**（从本机已登记的项目里挑）/
+     **自定义路径**；下方始终显示「归档工作区 → 目标工作区」的映射，导入后会话会被登记进目标项目；
+   - **权限预设**：**使用本机预设**（默认，取本机默认预设）/ **沿用归档**；同时显示归档里的权限状态；
+   - **归入对应项目**：默认开启，把恢复出的会话登记进目标工作区（见「恢复语义」）；
    - **恢复图片与文件**：默认开启（部署未挂载附件存储时自动禁用）；
-4. 点「开始导入」，弹窗展示每个会话的结果；成功后可直接「打开会话」跳到恢复出来的根会话，
-   会话列表会同步刷新。
+4. 点「开始导入」，弹窗展示每个会话的结果（含归入的项目与权限变化）；成功后可直接「打开会话」
+   跳到恢复出来的根会话，会话列表会同步刷新。
 
 ### 2. 斜杠命令（归档已在本机时）
 
 ```
 /import D:\backup\dsh-session-<id>.zip
-/import "D:\路径 带空格\x.zip" --copy          # 作为副本导入（新会话 ID）
-/import x.zip --cwd C:\work\project          # 统一恢复到指定工作区
-/import x.zip --no-media                     # 只恢复对话，不恢复附件
+/import "D:\路径 带空格\x.zip" --copy           # 作为副本导入（新会话 ID）
+/import x.zip --cwd C:\work\project           # 统一恢复到指定工作区
+/import x.zip --permission workspace-write    # 指定导入后的权限预设
+/import x.zip --keep-permissions              # 沿用归档里的权限设置
+/import x.zip --no-media                      # 只恢复对话，不恢复附件
 ```
 
-命令参数：`--copy` / `-c`、`--no-media`、`--cwd <路径>`（相对路径按当前工作目录解析）。
-执行成功后会刷新会话列表，并在命令结果里列出恢复出的会话 ID。
+命令参数：`--copy` / `-c`、`--no-media`、`--cwd <路径>`（相对路径按当前工作目录解析）、
+`--permission <预设名>`、`--keep-permissions`。不带 `--cwd` 时默认恢复到**当前会话所在的工作区**，
+并把恢复出的会话登记进该项目。执行成功后会刷新会话列表，并在命令结果里列出恢复出的会话 ID、
+归入的项目以及权限变化。
 
 ### 3. 编程接口（其他插件）
 
@@ -127,7 +136,20 @@ const result = await service.commit({ token, mode: 'restore', cwd, importMedia: 
   改写为新 ID（`parentSession`、子会话目录、JSON 文本载体一并处理）。
 - **工作区**：`cwd` 必须在本平台是绝对路径，且缺失 `cwd` 的冷会话不会出现在会话列表中
   （这是 dsh 的既有行为）。归档跨平台导入时，预览会标注「工作区路径在本平台不可用」，
-  并要求指定目标工作区；命令模式下用 `--cwd` 指定。
+  并要求指定目标工作区；命令模式下用 `--cwd` 指定。默认目标是**当前会话所在的工作区**，
+  归档里的工作区只在本机确实存在、可用且你选择「归档工作区」时才使用。
+- **归入项目**：dsh 的项目侧栏不是按 `cwd` 自动归并的，而是按工作区记录里的 `sessionIds`
+  记账（「成员资格是所有权加实时 cwd 事实」）。所以导入完成后，插件会像 harness 自己建会话那样
+  调用 `workspaceRegistry.resolveByPath(cwd)` / `create(cwd)` 与 `attachSession(id)`，把恢复出的
+  普通会话登记进目标项目；登记成功后侧边栏会实时出现该项目下的会话，不会掉进 **Ungrouped**。
+  仅当目标目录存在时才会登记（项目本身就是一个目录），子会话永不单独登记。
+- **权限预设**：dsh 不存"预设标签"，而是折叠日志里的 `permission/preset`、`sandbox/mode`、
+  `approval/policy` 三个事件，再用 `(sandbox, approval)` 反查本机预设表。归档带着**导出机器**的
+  权限设置，遇到本机预设表没有的组合（例如 `workspace-write` + `approval: never`）就会解析成
+  `custom`，界面上「工作区内修改」随之消失。导入默认按本机的默认预设写回同一组事件
+  （与 `dsh-permission-presets` 的写入顺序完全一致），因此恢复出的会话与你本机新建的会话权限相同；
+  需要原样保留时选「沿用归档」或 `--keep-permissions`。注意沙箱的可写边界是
+  `session.header.cwd`，所以工作区选错时"写不进去"表现为路径不对，而不是权限被降级。
 - **冲突**：`create()` 拒绝已存在的 ID，且本版本没有删除接口，因此已存在时**不会覆盖**，
   而是整批降级为副本模式并提示。
 - **继承切点**：`isSeeded` 会话的 `inheritedEventCount` 由日志里最后一个
@@ -146,7 +168,9 @@ const result = await service.commit({ token, mode: 'restore', cwd, importMedia: 
   更旧的版本会提示「没有恢复路径，请用能读它的 dsh 打开后重新导出」，两者都不会被误读。
 - 恢复出来的会话带着原来的 `request/header` 历史；**之后的请求使用当前 envelope**
   （当前模型、系统提示词、工具集），所以从别的机器导入时，第一轮续聊发出的请求与你当前的
-  模型/权限设置一致，而不是归档时的设置。
+  模型设置一致，而不是归档时的设置。
+- 权限预设按上面的规则归一化到本机默认，但如果本部署没有挂载 `permissionPresets`
+  （headless / SDK profile），插件会保留归档里的权限事件并在结果里说明。
 - `agentPreset` 按原样写入：如果本机没有同名 preset，会话仍可打开，但续聊前请先确认预设。
 - 不提供删除/保留接口：导入是增量操作，清理需要自行删除
   `$DSH_HOME/sessions/<项目目录>/<会话目录>/`。
@@ -166,17 +190,19 @@ const result = await service.commit({ token, mode: 'restore', cwd, importMedia: 
 ## 结构
 
 ```
-lib/index.js      插件入口：服务、路由、/import 命令
-lib/service.js    preview / commit / discard，工作区采样与回退
-lib/restore.js    恢复引擎：身份映射、批量 append、冲突降级
-lib/media.js      附件恢复与引用改写
-lib/archive.js    归档解析：条目分类、JSONL 校验、继承切点、跨平台工作区判定
-lib/zip.js        零依赖 ZIP 读取器 + 多帧 Zstandard 解码
-lib/vocabulary.js 本版本的事件词表与格式版本
-lib/staging.js    上传暂存与清理
-lib/routes.js     三个 HTTP 路由
-lib/client.js     浏览器半侧（手写 lazy-CJS bundle）：侧边栏入口 + 会话头部触发器 + 导入弹窗
-test/             52 个离线测试 + 跨平台（POSIX 语义）模拟器 + 可选的真实工件校验脚本
+lib/index.js        插件入口：服务、路由、/import 命令
+lib/service.js      preview / commit / discard，项目列表与工作区建议
+lib/restore.js      恢复引擎：身份映射、批量 append、冲突降级、工作区登记与权限归一化
+lib/media.js        附件恢复与引用改写
+lib/archive.js      归档解析：条目分类、JSONL 校验、继承切点、跨平台工作区判定
+lib/permissions.js  权限事实的读取、预设反查与归一化写入
+lib/workspace.js    把恢复出的会话登记进目标项目（resolveByPath / create / attachSession）
+lib/zip.js          零依赖 ZIP 读取器 + 多帧 Zstandard 解码
+lib/vocabulary.js   本版本的事件词表与格式版本
+lib/staging.js      上传暂存与清理
+lib/routes.js       三个 HTTP 路由
+lib/client.js       浏览器半侧（手写 lazy-CJS bundle）：侧边栏入口 + 会话头部触发器 + 导入弹窗
+test/               82 个离线测试 + 跨平台（POSIX 语义）模拟器 + 可选的真实工件校验脚本
 ```
 
 ## 开发

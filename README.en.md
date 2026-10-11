@@ -28,7 +28,9 @@ dsh session-log ZIP  ──►  preview (read the archive, write nothing)  ─�
 | A real restore, not a rebuild | Logs are written event by event through a `ctx.sessionPersistence` write handle, so a restored Session is indistinguishable from one dsh wrote itself: it lists, opens, and resumes |
 | Two import modes | **Original identity** (keep the archived ids and workspace) or **copy** (mint new ids — the safe choice for archives from another machine) |
 | Conflicts escalate instead of overwriting | When an identity already exists here, the whole import switches to copy mode, and every reference to that id inside events is rewritten — including JSON-text carriers such as `tool/call.arguments` |
-| Workspace rewrite | A workspace that is missing here, or written in another platform's convention (Windows ↔ POSIX), can be replaced with a target workspace for every restored Session |
+| Workspace rewrite | A workspace that is missing here, or written in another platform's convention (Windows ↔ POSIX), can be replaced with a target workspace for every restored Session; the default target is the invoking Session's workspace |
+| Joins the target project | After the write, `workspaceRegistry.resolveByPath` / `create` / `attachSession` register the Session, so it shows up under the chosen project instead of the Ungrouped bucket |
+| Permission preset normalization | An archive carries the exporting machine's posture; the import resolves it against this deployment's catalog and pins the default preset through the same three events dsh writes, so pairs like `workspace-write + approval: never` no longer resolve to `custom` (keeping the archive's own settings stays an option) |
 | Attachment restore | `media/*` images go through `ctx.attachments.saveImage`; `files/*` files stream through `saveFileStream`. When the store re-normalizes an object into a different id, the log's reference is rewritten to match |
 | Strict archive validation | Format version, event vocabulary, dense `seq`, exact header key set, and `isSeeded`/`session/end-seed` agreement are all checked before anything is written — publishing an unreadable log is worse than refusing it |
 | Legacy archives | Raw `.jsonl.zstd` artifacts from 0.1.x exports (concatenated Zstandard frames) are decoded too; generations this build cannot restore are refused with a precise reason instead of being misread |
@@ -86,10 +88,13 @@ The flow:
 2. The dialog reports what the archive holds: title, id, event count, creation time, whether the
    workspace exists / is usable here, whether that identity already exists, attachment counts and
    missing references, plus every non-fatal note;
-3. Choose **import mode** (original identity / copy), an optional **workspace** override, and whether
-   to restore **images and files**;
-4. Press **Start import**. The dialog lists the outcome per Session, and **Open session** jumps
-   straight to the restored root; the Session list refreshes.
+3. Choose **import mode** (original identity / copy), the **workspace** as one of three explicit
+   choices (keep the archive's / pick a registered project / type a path), and the **permission
+   preset** (this machine's default, or keep the archive's); the dialog always shows the
+   `archive workspace → target workspace` mapping and the archive's own permission posture;
+4. Press **Start import**. The dialog lists the outcome per Session, including the project it joined
+   and how the permissions changed, and **Open session** jumps straight to the restored root; the
+   Session list refreshes.
 
 ### 2. Slash command (archive already on this host)
 
@@ -97,11 +102,16 @@ The flow:
 /import D:\backup\dsh-session-<id>.zip
 /import "path with spaces\x.zip" --copy      # import as a copy (new session ids)
 /import x.zip --cwd /work/project           # restore into a specific workspace
+/import x.zip --permission workspace-write  # pin one permission preset
+/import x.zip --keep-permissions            # keep the archive's own settings
 /import x.zip --no-media                    # conversation only, no attachments
 ```
 
 Options: `--copy` / `-c`, `--no-media`, `--cwd <path>` (relative paths resolve against the current
-working directory). A successful run refreshes the Session list and names the restored ids.
+working directory), `--permission <name>`, `--keep-permissions`. Without `--cwd` the target is the
+**workspace of the invoking Session**, and the restored Sessions are registered with that project.
+A successful run refreshes the Session list and names the restored ids, the project they joined, and
+the permission change.
 
 ### 3. Programmatic surface
 
@@ -135,7 +145,24 @@ browser-facing operations; a status code therefore always means the request itse
 - **Workspace.** `cwd` must be an absolute path *on this platform*; a cold Session without one never
   appears in the Session list (existing dsh behaviour). A cross-platform archive is flagged in the
   preview as "workspace path is not absolute on this platform" and needs an explicit target (the
-  dialog's workspace field, or `--cwd`).
+  dialog's workspace field, or `--cwd`). The default target is the **invoking Session's workspace**;
+  the archived one is used only when it exists here, is usable, and you pick "archive workspace".
+- **Project membership.** dsh's sidebar does not group Sessions by `cwd`: a Session belongs to a
+  project only when the workspace record's `sessionIds` accounts for it ("membership is ownership
+  plus live cwd facts"). A restore therefore registers what it wrote the way the harness registers
+  its own Sessions — `workspaceRegistry.resolveByPath(cwd)` / `create(cwd)` and then
+  `attachSession(id)` — so the restored Session appears under the chosen project instead of the
+  **Ungrouped** bucket. Registration happens only when the directory exists (a project *is* a
+  directory), and subagent Sessions are never registered on their own.
+- **Permission preset.** dsh stores no preset label: it folds `permission/preset`, `sandbox/mode`,
+  and `approval/policy` and looks the resulting `(sandbox, approval)` pair up in the deployment's
+  catalog. An archive carries the *exporting* machine's posture, and a pair this host has no entry
+  for — `workspace-write` with `approval: never`, for instance — resolves to `custom`, which is how
+  "workspace write" appears to vanish. Imports pin this deployment's default preset by appending the
+  same three events in the same order `dsh-permission-presets` writes them, so a restored Session
+  matches a fresh one here; choose "keep archive" (or `--keep-permissions`) to preserve the original.
+  Note that the sandbox's writable boundary is `session.header.cwd`, so a wrong workspace shows up as
+  the wrong path rather than a downgraded permission.
 - **Conflicts.** `create()` rejects an identity that already exists and this build ships no delete
   API, so an existing Session is **never overwritten**: the import switches to copy mode and says so.
 - **Inheritance cut.** A seeded Session's `inheritedEventCount` is derived from the log's last
@@ -157,7 +184,10 @@ browser-facing operations; a status code therefore always means the request itse
   harness"; an older one says where to re-export it from. Neither is ever misread.
 - A restored Session keeps its historical `request/header` events, but **the next request uses the
   current envelope** (current model, system prompt, tool set). Importing from another machine
-  therefore continues under *your* model and permission settings.
+  therefore continues under *your* model settings.
+- The permission preset is normalized to this deployment's default as described above; on a
+  deployment that mounts no `permissionPresets` (headless / SDK profile) the archive's events are
+  kept and the result says so.
 - `agentPreset` is stored verbatim: if this machine has no preset with that name the Session still
   opens, but check the preset before continuing it.
 - There is no delete or retention API: importing is additive, and cleaning up means removing
@@ -179,16 +209,18 @@ Add a `config:` block to the insert row in `cordis.patch.yml`:
 
 ```
 lib/index.js      Plugin entry: service, routes, the /import command
-lib/service.js    preview / commit / discard, workspace sampling and fallback
-lib/restore.js    Restore engine: identity mapping, batched append, conflict escalation
+lib/service.js    preview / commit / discard, project list and workspace suggestion
+lib/restore.js    Restore engine: identity mapping, batched append, conflict escalation, project registration, permission normalization
 lib/media.js      Attachment restore and reference rewriting
 lib/archive.js    Archive reading: entry classification, JSONL validation, inheritance cut, portable workspaces
+lib/permissions.js Reading permission facts, resolving them against this catalog, writing the override
+lib/workspace.js  Registering restored Sessions with their project (resolveByPath / create / attachSession)
 lib/zip.js        Dependency-free ZIP reader plus multi-frame Zstandard decoding
 lib/vocabulary.js The event vocabulary and format version of this build
 lib/staging.js    Upload staging and cleanup
 lib/routes.js     The three HTTP routes
 lib/client.js     Browser half (hand-written lazy-CJS bundle): sidebar entry, header trigger, import dialog
-test/             52 offline tests, a cross-platform (POSIX-semantics) simulator, and an optional real-artifact checker
+test/             82 offline tests, a cross-platform (POSIX-semantics) simulator, and an optional real-artifact checker
 ```
 
 ## Development

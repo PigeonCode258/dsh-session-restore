@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { apply, inject, name } from '../lib/index.js';
-import { buildZip, conversationLog, logText } from './helpers.mjs';
+import { buildZip, conversationLog, event, FakePermissionPresets, logText } from './helpers.mjs';
 
 /** @type {string} */
 let workspace;
@@ -85,11 +85,12 @@ class FakePersistence {
 
 /**
  * Mount the plugin on a stand-in host.
+ * @param {object} [services] - extra host services (for example permission presets).
  * @returns {{ ctx: FakeContext, persistence: FakePersistence }} the mounted host.
  */
-function mount() {
+function mount(services = {}) {
   const persistence = new FakePersistence();
-  const ctx = new FakeContext({ sessionPersistence: persistence });
+  const ctx = new FakeContext({ sessionPersistence: persistence, ...services });
   // A Cordis context exposes services as properties too; `scope.commands` and
   // `ctx.connection` are property reads in the plugin.
   ctx.connection = {
@@ -172,4 +173,52 @@ test('/import --copy mints a new identity', async () => {
   assert.equal(persistence.sessions.has(header.id), false);
   assert.equal(persistence.sessions.size, 1);
   assert.match([...persistence.sessions.keys()][0], /^session-[0-9a-f-]{36}$/u);
+});
+
+test('/import normalizes the permission preset and says so', async () => {
+  const { header, events } = conversationLog();
+  const archive = join(workspace, 'dsh-session-permissions.zip');
+  await writeFile(archive, buildZip([{ name: 'session.v4.jsonl', data: logText(header, events) }]));
+  const { ctx, persistence } = mount({ permissionPresets: new FakePermissionPresets() });
+  const result = await ctx.commandDefinitions.get('import').handler({ rawInput: `"${archive}"`, agent: { id: 'session-x' } });
+  assert.equal(result.kind, 'success', result.text);
+  assert.match(result.text, /工作区：未登记到项目/u, 'a workspace that is not here is reported, not hidden');
+  assert.match(result.text, /权限：归档为 .+，已设为 workspace-write/u);
+  const stored = persistence.sessions.get(header.id).events;
+  assert.equal(stored.length, events.length + 3);
+  assert.deepEqual(stored.at(-1), { type: 'approval/policy', seq: events.length + 2, time: stored.at(-1).time, data: { policy: 'ask' } });
+});
+
+test('/import --keep-permissions leaves the archived posture alone', async () => {
+  const { header, events } = conversationLog({
+    extraEvents: [
+      event(7, 'permission/preset', { preset: 'workspace-write' }),
+      event(8, 'sandbox/mode', { mode: 'workspace-write' }),
+      event(9, 'approval/policy', { policy: 'never' }),
+    ],
+  });
+  const archive = join(workspace, 'dsh-session-keep.zip');
+  await writeFile(archive, buildZip([{ name: 'session.v4.jsonl', data: logText(header, events) }]));
+  const { ctx, persistence } = mount({ permissionPresets: new FakePermissionPresets() });
+  const result = await ctx.commandDefinitions.get('import').handler({
+    rawInput: `"${archive}" --keep-permissions`,
+    agent: { id: 'session-x' },
+  });
+  assert.equal(result.kind, 'success', result.text);
+  assert.match(result.text, /权限：沿用归档（custom）/u, 'the mismatched archive posture is named as custom');
+  assert.equal(persistence.sessions.get(header.id).events.length, events.length);
+});
+
+test('/import --permission <name> refuses a preset this deployment does not offer', async () => {
+  const { header, events } = conversationLog();
+  const archive = join(workspace, 'dsh-session-unknown-preset.zip');
+  await writeFile(archive, buildZip([{ name: 'session.v4.jsonl', data: logText(header, events) }]));
+  const { ctx, persistence } = mount({ permissionPresets: new FakePermissionPresets() });
+  const result = await ctx.commandDefinitions.get('import').handler({
+    rawInput: `"${archive}" --permission auto`,
+    agent: { id: 'session-x' },
+  });
+  assert.equal(result.kind, 'error');
+  assert.match(result.text, /not offered here/u);
+  assert.equal(persistence.sessions.size, 0, 'a preset the operator named must not be ignored');
 });

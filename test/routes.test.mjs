@@ -10,7 +10,20 @@ import { after, before, test } from 'node:test';
 import { registerRestoreRoutes, SESSION_RESTORE_PATHS } from '../lib/routes.js';
 import { SessionRestoreService } from '../lib/service.js';
 import { Staging } from '../lib/staging.js';
-import { buildZip, conversationLog, DEMO_CWD, headerLine, logText } from './helpers.mjs';
+import {
+  buildZip,
+  conversationLog,
+  DEMO_CWD,
+  FakeWorkspaceRegistry,
+  headerLine,
+  logText,
+  OTHER_CWD,
+  PLATFORM,
+  SIMULATED_POSIX_ON_WINDOWS,
+} from './helpers.mjs';
+
+/** A real temp directory is only storable on the platform that produced it. */
+const NATIVE_TEMP_SKIP = SIMULATED_POSIX_ON_WINDOWS ? 'a Windows temp directory is not an absolute path on the simulated POSIX platform' : false;
 
 /** @type {string} */
 let workspace;
@@ -89,11 +102,12 @@ class FakePersistence {
 /**
  * Wire a service with the restore routes registered.
  * @param {object} [archiveOptions] - log overrides.
+ * @param {object} [services] - extra host services (for example a workspace registry).
  * @returns {Promise<{ ctx: FakeContext, persistence: FakePersistence, service: SessionRestoreService, zip: Buffer }>} the harness.
  */
-async function harness(archiveOptions = {}) {
+async function harness(archiveOptions = {}, services = {}) {
   const persistence = new FakePersistence();
-  const ctx = new FakeContext({ sessionPersistence: persistence });
+  const ctx = new FakeContext({ sessionPersistence: persistence, ...services });
   const connection = {
     fetch: {
       register: (route) => {
@@ -268,4 +282,83 @@ test('the workspace list is derived from stored Sessions', async () => {
   ))).json();
   assert.deepEqual(preview.value.workspaces.map((entry) => entry.cwd), [DEMO_CWD]);
   assert.equal(preview.value.workspaces[0].sessions, 1);
+  assert.equal(preview.value.suggestedSource, 'project', 'the archived workspace is missing here, so a known directory is suggested');
+  assert.equal(preview.value.workspaceRegistryAvailable, false, 'this harness mounts no workspace registry');
+});
+
+test('an archived workspace that exists here is the suggestion', { skip: NATIVE_TEMP_SKIP }, async () => {
+  const target = await mkdtemp(join(tmpdir(), 'dsh-session-restore-archived-'));
+  const { ctx, zip } = await harness({ header: { cwd: target } });
+  const preview = await (await dispatch(ctx, SESSION_RESTORE_PATHS.preview, new Request(
+    `http://host${SESSION_RESTORE_PATHS.preview}`,
+    { method: 'POST', headers: { 'content-type': 'application/zip' }, body: zip },
+  ))).json();
+  assert.equal(preview.value.suggestedCwd, target);
+  assert.equal(preview.value.suggestedSource, 'archive');
+  await rm(target, { recursive: true, force: true });
+});
+
+test('the projects this deployment registers outrank the sampled directories', async () => {
+  const registry = new FakeWorkspaceRegistry({
+    projects: [
+      { id: 'workspace-1', path: OTHER_CWD, title: 'other' },
+      { id: 'workspace-2', path: DEMO_CWD, title: 'demo' },
+    ],
+  });
+  const { ctx, persistence, zip } = await harness({}, { workspaceRegistry: registry });
+  await persistence.create({ ...headerLine({ cwd: OTHER_CWD }), type: undefined });
+  const preview = await (await dispatch(ctx, SESSION_RESTORE_PATHS.preview, new Request(
+    `http://host${SESSION_RESTORE_PATHS.preview}`,
+    { method: 'POST', headers: { 'content-type': 'application/zip' }, body: zip },
+  ))).json();
+  assert.deepEqual(preview.value.workspaces.map((entry) => entry.id), ['workspace-1', 'workspace-2']);
+  assert.deepEqual(preview.value.workspaces.map((entry) => entry.title), ['other', 'demo']);
+  assert.equal(preview.value.workspaceRegistryAvailable, true);
+});
+
+test('the invoking Session is the default target, and the archive permission posture is reported', async () => {
+  const target = await mkdtemp(join(tmpdir(), 'dsh-session-restore-routes-'));
+  const { ctx, persistence, zip } = await harness();
+  await persistence.create({ ...headerLine({ id: 'session-88888888-8888-4888-8888-888888888888', cwd: target }), type: undefined });
+  const preview = await (await dispatch(ctx, SESSION_RESTORE_PATHS.preview, new Request(
+    `http://host${SESSION_RESTORE_PATHS.preview}?sessionId=session-88888888-8888-4888-8888-888888888888`,
+    { method: 'POST', headers: { 'content-type': 'application/zip' }, body: zip },
+  ))).json();
+  assert.equal(preview.value.suggestedCwd, target, 'the workspace the person is working in wins');
+  assert.equal(preview.value.suggestedSource, 'current-session');
+  assert.equal(preview.value.permissions.label, 'custom', 'the archived knobs match no preset without a catalog');
+  assert.equal(preview.value.permissions.configurable, false);
+  await rm(target, { recursive: true, force: true });
+});
+
+test('commit passes the workspace and permission choices through to the restore', async () => {
+  const { ctx, persistence, zip } = await harness();
+  const staged = await (await dispatch(ctx, SESSION_RESTORE_PATHS.preview, new Request(
+    `http://host${SESSION_RESTORE_PATHS.preview}`,
+    { method: 'POST', headers: { 'content-type': 'application/zip' }, body: zip },
+  ))).json();
+  const commit = await (await dispatch(ctx, SESSION_RESTORE_PATHS.commit, jsonRequest(
+    `http://host${SESSION_RESTORE_PATHS.commit}`,
+    { token: staged.value.token, cwd: OTHER_CWD, permissions: 'keep-archive', attachWorkspace: false },
+  ))).json();
+  assert.equal(commit.ok, true);
+  assert.equal(commit.value.sessions[0].cwd, OTHER_CWD);
+  assert.equal(commit.value.permissions.applied, null, 'keeping the archive appends no override');
+  assert.equal(commit.value.workspaceAttached, false);
+  assert.equal(commit.value.sessions[0].attachment.reason, 'attach-disabled');
+  assert.equal(persistence.sessions.size, 1);
+});
+
+test('a named preset this deployment does not offer refuses the import', async () => {
+  const { ctx, zip } = await harness();
+  const staged = await (await dispatch(ctx, SESSION_RESTORE_PATHS.preview, new Request(
+    `http://host${SESSION_RESTORE_PATHS.preview}`,
+    { method: 'POST', headers: { 'content-type': 'application/zip' }, body: zip },
+  ))).json();
+  const commit = await (await dispatch(ctx, SESSION_RESTORE_PATHS.commit, jsonRequest(
+    `http://host${SESSION_RESTORE_PATHS.commit}`,
+    { token: staged.value.token, permissions: 'workspace-write' },
+  ))).json();
+  assert.equal(commit.ok, false);
+  assert.equal(commit.error.code, 'permission-preset-unavailable');
 });

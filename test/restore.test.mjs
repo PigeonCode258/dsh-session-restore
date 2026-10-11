@@ -9,9 +9,40 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { readSessionArchive } from '../lib/archive.js';
+import { KEEP_ARCHIVE_PERMISSIONS } from '../lib/permissions.js';
 import { ZipFile } from '../lib/zip.js';
 import { RestoreError, restoreArchive } from '../lib/restore.js';
-import { buildZip, conversationLog, DEMO_CWD, event, fileBlock, FOREIGN_CWD, imageBlock, logText, OTHER_CWD, PLATFORM } from './helpers.mjs';
+import {
+  buildZip,
+  conversationLog,
+  DEMO_CWD,
+  event,
+  FakePermissionPresets,
+  FakeWorkspaceRegistry,
+  fileBlock,
+  FOREIGN_CWD,
+  imageBlock,
+  logText,
+  OTHER_CWD,
+  PLATFORM,
+  SIMULATED_POSIX_ON_WINDOWS,
+} from './helpers.mjs';
+
+/**
+ * The three events dsh writes to pin one permission posture.
+ * @param {number} startSeq - first sequence number.
+ * @param {{ preset: string | null, sandbox: string, approval: string }} posture - the posture.
+ * @returns {object[]} the events.
+ */
+function permissionEvents(startSeq, posture) {
+  const events = [];
+  let seq = startSeq;
+  if (posture.preset !== null) events.push(event(seq, 'permission/preset', { preset: posture.preset }));
+  if (posture.preset !== null) seq += 1;
+  events.push(event(seq, 'sandbox/mode', { mode: posture.sandbox }));
+  events.push(event(seq + 1, 'approval/policy', { policy: posture.approval }));
+  return events;
+}
 
 /** @type {string} */
 let workspace;
@@ -448,6 +479,181 @@ test('a partial log is appended in contiguous batches', async () => {
     assert.equal(persistence.sessions.get(root.header.id).events.length, 1200);
     assert.ok(persistence.appends.length > 1, 'expected more than one append batch');
     assert.equal(persistence.appends.reduce((total, count) => total + count, 0), 1200);
+  } finally {
+    await zip.close();
+  }
+});
+
+/**
+ * Project registration needs a directory that really exists, which means a
+ * native temp path — and the simulated POSIX platform cannot store one, so
+ * those tests step aside there. The attach rules themselves are covered by
+ * `workspace.test.mjs`, which calls the seam directly.
+ */
+const NATIVE_TEMP_SKIP = SIMULATED_POSIX_ON_WINDOWS
+  ? 'a Windows temp directory is not an absolute path on the simulated POSIX platform'
+  : false;
+
+test('restore groups the root Session into its project and never a subagent', { skip: NATIVE_TEMP_SKIP }, async () => {
+  const target = await mkdtemp(join(tmpdir(), 'dsh-session-restore-target-'));
+  const root = conversationLog({ header: { cwd: target } });
+  const child = conversationLog({
+    header: {
+      id: 'session-44444444-4444-4444-8444-444444444444',
+      cwd: target,
+      createdAt: 1_700_000_002_000,
+      isSeeded: false,
+      delegationDepth: 1,
+      origin: 'subagent',
+      parentSession: root.header.id,
+    },
+  });
+  const { zip, archive } = await openArchive('workspace.zip', [
+    { name: 'session.v4.jsonl', data: logText(root.header, root.events) },
+    { name: `subagents/${child.header.id}/session.v4.jsonl`, data: logText(child.header, child.events) },
+  ]);
+  const persistence = new FakePersistence();
+  const registry = new FakeWorkspaceRegistry();
+  try {
+    const result = await restoreArchive({ sessionPersistence: persistence, workspaceRegistry: registry, archive, zip }, {});
+    assert.equal(result.workspaceAttached, true);
+    assert.equal(result.workspace.path, target);
+    assert.deepEqual(registry.created, [target]);
+    assert.deepEqual(registry.attached.map((entry) => entry.sessionId), [root.header.id]);
+    assert.deepEqual(result.sessions.find((session) => session.role === 'root').attachment.created, true);
+    assert.equal(result.sessions.find((session) => session.role === 'subagent').attachment, undefined);
+  } finally {
+    await zip.close();
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
+test('restore reuses the project that already owns the workspace', { skip: NATIVE_TEMP_SKIP }, async () => {
+  const target = await mkdtemp(join(tmpdir(), 'dsh-session-restore-target-'));
+  const root = conversationLog({ header: { cwd: target } });
+  const { zip, archive } = await openArchive('workspace-existing.zip', [
+    { name: 'session.v4.jsonl', data: logText(root.header, root.events) },
+  ]);
+  const registry = new FakeWorkspaceRegistry({ projects: [{ id: 'workspace-7', path: target, title: 'kept' }] });
+  try {
+    const result = await restoreArchive({ sessionPersistence: new FakePersistence(), workspaceRegistry: registry, archive, zip }, {});
+    assert.deepEqual(registry.created, []);
+    assert.deepEqual(result.workspace, { id: 'workspace-7', path: target, title: 'kept' });
+  } finally {
+    await zip.close();
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
+test('a workspace that is missing here warns instead of failing the restore', async () => {
+  const root = conversationLog();
+  const { zip, archive } = await openArchive('workspace-missing.zip', [
+    { name: 'session.v4.jsonl', data: logText(root.header, root.events) },
+  ]);
+  const persistence = new FakePersistence();
+  const registry = new FakeWorkspaceRegistry();
+  try {
+    const result = await restoreArchive({ sessionPersistence: persistence, workspaceRegistry: registry, archive, zip }, {});
+    assert.equal(result.sessions[0].status, 'restored');
+    assert.equal(result.workspaceAttached, false);
+    assert.equal(result.workspace, null);
+    assert.equal(result.sessions[0].attachment.attached, false);
+    assert.equal(result.sessions[0].attachment.reason, 'workspace-directory-missing');
+    assert.ok(result.warnings.some((warning) => warning.includes('does not exist here')), 'expected a warning about the missing directory');
+    assert.deepEqual(registry.attached, []);
+  } finally {
+    await zip.close();
+  }
+});
+
+test('an attach refusal is reported without losing the restored Session', { skip: NATIVE_TEMP_SKIP }, async () => {
+  const target = await mkdtemp(join(tmpdir(), 'dsh-session-restore-target-'));
+  const root = conversationLog({ header: { cwd: target } });
+  const { zip, archive } = await openArchive('workspace-refused.zip', [
+    { name: 'session.v4.jsonl', data: logText(root.header, root.events) },
+  ]);
+  const persistence = new FakePersistence();
+  const registry = new FakeWorkspaceRegistry({ attachFails: true });
+  try {
+    const result = await restoreArchive({ sessionPersistence: persistence, workspaceRegistry: registry, archive, zip }, {});
+    assert.equal(result.sessions[0].status, 'restored');
+    assert.equal(result.workspaceAttached, false);
+    assert.match(result.sessions[0].attachment.reason, /cannot attach session/u);
+    assert.ok(result.warnings.some((warning) => warning.includes('could not be registered')));
+  } finally {
+    await zip.close();
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
+test('restore pins the preset a fresh Session on this machine starts with', async () => {
+  const root = conversationLog({ extraEvents: permissionEvents(7, { preset: 'workspace-write', sandbox: 'workspace-write', approval: 'never' }) });
+  const { zip, archive } = await openArchive('permissions-normalize.zip', [
+    { name: 'session.v4.jsonl', data: logText(root.header, root.events) },
+  ]);
+  const persistence = new FakePersistence();
+  const presets = new FakePermissionPresets();
+  try {
+    const result = await restoreArchive(
+      { sessionPersistence: persistence, permissionPresets: presets, shell: { sandboxMode: 'workspace-write' }, approval: { config: { policy: 'ask' } }, archive, zip },
+      {},
+    );
+    // The archive's knobs (workspace-write + approval never) match no preset here.
+    assert.deepEqual(result.permissions, { archived: 'custom', applied: 'workspace-write' });
+    const stored = persistence.sessions.get(root.header.id).events;
+    assert.equal(stored.length, root.events.length + 3);
+    assert.deepEqual(stored.slice(-3), [
+      { type: 'permission/preset', seq: root.events.length, time: stored.at(-3).time, data: { preset: 'workspace-write' } },
+      { type: 'sandbox/mode', seq: root.events.length + 1, time: stored.at(-2).time, data: { mode: 'workspace-write' } },
+      { type: 'approval/policy', seq: root.events.length + 2, time: stored.at(-1).time, data: { policy: 'ask' } },
+    ]);
+    assert.ok(result.warnings.some((warning) => warning.includes('match no preset here')));
+  } finally {
+    await zip.close();
+  }
+});
+
+test('keeping the archive permissions appends no event at all', async () => {
+  const root = conversationLog({ extraEvents: permissionEvents(7, { preset: 'workspace-write', sandbox: 'workspace-write', approval: 'ask' }) });
+  const { zip, archive } = await openArchive('permissions-kept.zip', [
+    { name: 'session.v4.jsonl', data: logText(root.header, root.events) },
+  ]);
+  const persistence = new FakePersistence();
+  try {
+    const result = await restoreArchive(
+      { sessionPersistence: persistence, permissionPresets: new FakePermissionPresets(), archive, zip },
+      { permissions: KEEP_ARCHIVE_PERMISSIONS },
+    );
+    assert.deepEqual(result.permissions, { archived: 'workspace-write', applied: null });
+    assert.equal(persistence.sessions.get(root.header.id).events.length, root.events.length);
+    assert.equal(result.warnings.some((warning) => warning.includes('runs as')), false);
+  } finally {
+    await zip.close();
+  }
+});
+
+test('the permission override never rewrites a subagent log', async () => {
+  const root = conversationLog({ extraEvents: permissionEvents(7, { preset: 'workspace-write', sandbox: 'workspace-write', approval: 'never' }) });
+  const child = conversationLog({
+    header: {
+      id: 'session-55555555-5555-4555-8555-555555555555',
+      createdAt: 1_700_000_002_000,
+      isSeeded: false,
+      delegationDepth: 1,
+      origin: 'subagent',
+      parentSession: root.header.id,
+    },
+    extraEvents: permissionEvents(7, { preset: null, sandbox: 'workspace-write', approval: 'never' }),
+  });
+  const { zip, archive } = await openArchive('permissions-subagent.zip', [
+    { name: 'session.v4.jsonl', data: logText(root.header, root.events) },
+    { name: `subagents/${child.header.id}/session.v4.jsonl`, data: logText(child.header, child.events) },
+  ]);
+  const persistence = new FakePersistence();
+  try {
+    await restoreArchive({ sessionPersistence: persistence, permissionPresets: new FakePermissionPresets(), archive, zip }, {});
+    assert.equal(persistence.sessions.get(root.header.id).events.length, root.events.length + 3);
+    assert.equal(persistence.sessions.get(child.header.id).events.length, child.events.length);
   } finally {
     await zip.close();
   }

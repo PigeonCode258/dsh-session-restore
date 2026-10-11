@@ -44,6 +44,7 @@ const primitives = {
   Input: 'Input',
   Checkbox: 'Checkbox',
   SegmentedControl: 'SegmentedControl',
+  Pill: 'Pill',
   Tag: 'Tag',
   IconUnarchiveOutlineRegular: 'IconUnarchiveOutlineRegular',
 };
@@ -129,7 +130,13 @@ async function mount() {
     provide: (key, value) => {
       if (key === 'sessionRestore') captured.controller = value;
     },
-    locale: { register: () => () => {} },
+    locale: {
+      register: (namespace, dictionaries) => {
+        captured.namespace = namespace;
+        captured.dictionaries = dictionaries;
+        return () => {};
+      },
+    },
     slots: {
       inject: (key, callback) => {
         pending = key;
@@ -190,10 +197,44 @@ function textsOf(node, out = []) {
   return out;
 }
 
+/**
+ * Every element in a rendered tree whose props satisfy one predicate,
+ * including the ones nested inside function components.
+ * @param {unknown} node - rendered node.
+ * @param {(props: object) => boolean} predicate - test for one element's props.
+ * @param {object[]} out - accumulator.
+ * @returns {object[]} the matching elements.
+ */
+function findAll(node, predicate, out = []) {
+  if (node === null || node === undefined || typeof node !== 'object') return out;
+  if (Array.isArray(node)) {
+    for (const item of node) findAll(item, predicate, out);
+    return out;
+  }
+  if (typeof node.type === 'function') return findAll(node.type({ ...node.props }), predicate, out);
+  if (predicate(node.props ?? {})) out.push(node);
+  for (const value of Object.values(node.props ?? {})) findAll(value, predicate, out);
+  return out;
+}
+
 test('the bundle registers its package id and exports apply/inject', async () => {
   const loaded = await loadBundle();
   assert.equal(typeof loaded.exports.apply, 'function');
   assert.deepEqual([...loaded.exports.inject], ['slots', 'locale']);
+});
+
+test('both dictionaries carry exactly the same keys', async () => {
+  const mounted = await mount();
+  const { namespace, dictionaries } = mounted;
+  assert.equal(namespace, 'session-restore');
+  const zh = Object.keys(dictionaries.zh).sort();
+  const en = Object.keys(dictionaries.en).sort();
+  assert.deepEqual(en, zh, 'a key missing from one dictionary renders as a raw key');
+  assert.ok(zh.length > 60, 'the dialog copy is substantial');
+  for (const [key, value] of Object.entries(dictionaries.en)) {
+    assert.equal(typeof value, 'string', `${key} must be a string`);
+    assert.notEqual(value.trim(), '', `${key} must not be empty`);
+  }
 });
 
 test('mounting adds one Session-header trigger and one sidebar entry', async () => {
@@ -311,6 +352,22 @@ test('the preview phase renders the archive, its options, and the commit action'
       attachments: { images: 2, files: 1, missingImages: 1, missingFiles: 0, storeAvailable: true },
       warnings: ['a warning'],
       suggestedCwd: 'C:\\work\\demo',
+      suggestedSource: 'archive',
+      workspaces: [
+        { id: 'workspace-1', cwd: 'C:\\work\\demo', path: 'C:\\work\\demo', title: 'demo', sessions: 2, lastCreatedAt: 0 },
+        { id: 'workspace-2', cwd: 'C:\\work\\other', path: 'C:\\work\\other', title: 'other', sessions: 1, lastCreatedAt: 0 },
+      ],
+      permissions: {
+        label: 'custom',
+        custom: true,
+        preset: 'workspace-write',
+        sandbox: 'workspace-write',
+        approval: 'never',
+        available: ['read-only', 'workspace-write', 'danger-full-access'],
+        defaultPreset: 'workspace-write',
+        configurable: true,
+      },
+      workspaceRegistryAvailable: true,
       conflicts: [],
     },
   });
@@ -324,6 +381,10 @@ test('the preview phase renders the archive, its options, and the commit action'
     'preview.cwdMissing',
     'options.mode',
     'options.cwd',
+    'options.workspaceArchive',
+    'options.permissions',
+    'options.permissionsArchive',
+    'options.attachWorkspace',
     'options.media',
     'commit',
     'cancel',
@@ -334,6 +395,10 @@ test('the preview phase renders the archive, its options, and the commit action'
     assert.ok(texts.some((text) => text.includes(expected)), `expected the preview to render ${expected}`);
   }
   assert.ok(texts.some((text) => text.includes('preview.attachments')), 'attachment counts are shown');
+  const cwdControl = findAll(rendered, (props) => props.id === 'ssr-cwd-mode')[0];
+  assert.deepEqual([...cwdControl.props.options].map((option) => String(option.value)), ['archive', 'project', 'custom']);
+  const permissionControl = findAll(rendered, (props) => props.id === 'ssr-permissions-mode')[0];
+  assert.deepEqual([...permissionControl.props.options].map((option) => String(option.value)), ['preset', 'archive']);
   assert.ok(texts.some((text) => text.includes('preview.attachmentsMissing')), 'missing attachments are reported');
   assert.ok(texts.some((text) => text.includes('preview.cwdUnusable')), 'a foreign-platform workspace is called out');
 });
@@ -363,6 +428,78 @@ test('the result phase renders every outcome and offers to open the root', async
   assert.ok(texts.some((text) => text.includes('done.attachments')));
   assert.ok(texts.includes('done.open'));
   assert.ok(texts.includes('done.finish'));
+});
+
+test('the workspace and permission pickers render the projects, the presets, and the mapping', async () => {
+  const mounted = await mount();
+  const preview = {
+    fileName: 'dsh-session-x.zip',
+    root: {
+      id: 'session-root',
+      role: 'root',
+      root: true,
+      title: '归档中的会话',
+      excerpt: '你好',
+      createdAt: 1_700_000_000_000,
+      cwd: 'C:\\archive\\demo',
+      cwdExists: true,
+      cwdUsable: true,
+      conflict: false,
+      isSeeded: false,
+      legacy: false,
+      events: 7,
+      agentPreset: 'standard',
+    },
+    descendants: [],
+    attachments: { images: 0, files: 0, missingImages: 0, missingFiles: 0, storeAvailable: true },
+    warnings: [],
+    suggestedCwd: 'C:\\work\\demo',
+    suggestedSource: 'current-session',
+    workspaces: [
+      { id: 'workspace-1', cwd: 'C:\\work\\demo', path: 'C:\\work\\demo', title: 'demo', sessions: 2, lastCreatedAt: 0 },
+      { id: 'workspace-2', cwd: 'C:\\work\\other', path: 'C:\\work\\other', title: 'other', sessions: 1, lastCreatedAt: 0 },
+    ],
+    permissions: {
+      label: 'custom',
+      custom: true,
+      preset: 'workspace-write',
+      sandbox: 'workspace-write',
+      approval: 'never',
+      available: ['read-only', 'workspace-write', 'danger-full-access'],
+      defaultPreset: 'workspace-write',
+      configurable: true,
+    },
+    workspaceRegistryAvailable: true,
+    conflicts: [],
+  };
+  const render = (patch) => {
+    mounted.controller.store.set({
+      ...mounted.controller.store.getSnapshot(),
+      open: true,
+      phase: 'preview',
+      token: 'token-1',
+      preview,
+      ...patch,
+    });
+    return mounted.footer.component(mounted.footer.props);
+  };
+
+  const projectMode = render({ cwdMode: 'project', projectId: 'workspace-1', cwd: 'C:\\work\\demo', permissionsMode: 'preset', permission: 'workspace-write' });
+  const projectTexts = textsOf(projectMode);
+  for (const expected of ['demo', 'other', 'read-only', 'danger-full-access', 'options.workspaceMap']) {
+    assert.ok(projectTexts.some((text) => text.includes(expected)), `expected the pickers to render ${expected}`);
+  }
+  const selected = findAll(projectMode, (props) => props.active === true).map((element) => element.props.children);
+  assert.deepEqual(selected.sort(), ['demo', 'workspace-write'], 'the chosen project and preset are marked active');
+  assert.equal(findAll(projectMode, (props) => props.className === 'ssr-input').length, 0, 'the free-text field only appears in custom mode');
+
+  const customMode = render({ cwdMode: 'custom', cwd: 'C:\\typed\\path' });
+  const input = findAll(customMode, (props) => props.className === 'ssr-input')[0];
+  assert.equal(input.props.value, 'C:\\typed\\path');
+  assert.ok(textsOf(customMode).some((text) => text.includes('options.workspaceMap')), 'custom mode still maps archive to target');
+
+  const archiveMode = render({ cwdMode: 'archive' });
+  assert.ok(textsOf(archiveMode).some((text) => text.includes('options.workspaceArchive')), 'archive mode explains what it keeps');
 });
 
 test('the failure phase shows the reason and offers to choose again', async () => {
@@ -440,6 +577,18 @@ test('upload posts the archive to the preview route and stores the token', async
         warnings: [],
         conflicts: ['session-root'],
         suggestedCwd: 'C:\\work\\demo',
+        suggestedSource: 'current-session',
+        workspaces: [{ id: 'workspace-1', cwd: 'C:\\work\\demo', path: 'C:\\work\\demo', title: 'demo', sessions: 1, lastCreatedAt: 0 }],
+        permissions: {
+          label: 'custom',
+          custom: true,
+          sandbox: 'workspace-write',
+          approval: 'never',
+          available: ['read-only', 'workspace-write'],
+          defaultPreset: 'workspace-write',
+          configurable: true,
+        },
+        workspaceRegistryAvailable: true,
       },
     }));
   mounted.controller.open('session-9');
@@ -454,16 +603,49 @@ test('upload posts the archive to the preview route and stores the token', async
   assert.equal(state.phase, 'preview');
   assert.equal(state.token, 'token-3');
   assert.equal(state.mode, 'copy', 'a conflicting archive defaults to copy mode');
-  assert.equal(state.useCwd, true, 'a missing workspace pre-selects the suggested one');
+  assert.equal(state.cwdMode, 'project', 'the workspace the person is working in is the default target');
   assert.equal(state.cwd, 'C:\\work\\demo');
+  assert.equal(state.projectId, 'workspace-1', 'the suggestion is recognised as an existing project');
+  assert.equal(state.permissionsMode, 'preset', 'the machine default preset is the default choice');
+  assert.equal(state.permission, 'workspace-write');
+  assert.equal(state.attachWorkspace, true);
   assert.equal(state.importMedia, false, 'no attachment store disables media restore');
+});
+
+test('an archive-only deployment keeps the archive permissions and offers no registry attach', async () => {
+  const mounted = await mount();
+  const { calls } = transport(mounted.controller, () =>
+    envelope({
+      ok: true,
+      value: {
+        token: 'token-5',
+        fileName: 'y.zip',
+        root: { id: 'session-root', events: 1, cwd: 'C:\\work\\demo', cwdExists: true, cwdUsable: true },
+        descendants: [],
+        attachments: { images: 0, files: 0, missingImages: 0, missingFiles: 0, storeAvailable: true },
+        warnings: [],
+        conflicts: [],
+        suggestedCwd: 'C:\\work\\demo',
+        suggestedSource: 'archive',
+        workspaces: [],
+        permissions: { label: 'workspace-write', custom: false, sandbox: 'workspace-write', approval: 'ask', available: [], defaultPreset: null, configurable: false },
+        workspaceRegistryAvailable: false,
+      },
+    }));
+  mounted.controller.open('session-9');
+  await mounted.controller.upload({ name: 'y.zip' }, 'session-9');
+  assert.equal(calls.length, 1);
+  const state = mounted.controller.store.getSnapshot();
+  assert.equal(state.cwdMode, 'archive', 'a usable archived workspace stays the target here');
+  assert.equal(state.permissionsMode, 'archive', 'no catalog means the archive posture is the only option');
+  assert.equal(state.attachWorkspace, false, 'no registry means nothing can be grouped');
 });
 
 test('commit posts the chosen options and records the result', async () => {
   const mounted = await mount();
   const { calls } = transport(mounted.controller, () =>
     envelope({ ok: true, value: { mode: 'restore', rootId: 'session-root', sessions: [], media: { restored: 0 }, warnings: [] } }));
-  mounted.controller.publish({ phase: 'preview', token: 'token-4', mode: 'restore', cwd: 'C:\\work\\x', useCwd: true, importMedia: true });
+  mounted.controller.publish({ phase: 'preview', token: 'token-4', mode: 'restore', cwd: 'C:\\work\\x', cwdMode: 'custom', importMedia: true, permissionsMode: 'preset', permission: 'read-only' });
   await mounted.controller.commit();
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, 'api/session.restore.commit');
@@ -472,11 +654,38 @@ test('commit posts the chosen options and records the result', async () => {
     mode: 'restore',
     cwd: 'C:\\work\\x',
     importMedia: true,
+    attachWorkspace: true,
+    permissions: 'read-only',
   });
   const state = mounted.controller.store.getSnapshot();
   assert.equal(state.phase, 'done');
   assert.equal(state.token, null);
   assert.equal(state.result.rootId, 'session-root');
+});
+
+test('keeping the archived workspace and permissions posts neither override', async () => {
+  const mounted = await mount();
+  const { calls } = transport(mounted.controller, () =>
+    envelope({ ok: true, value: { mode: 'restore', rootId: 'session-root', sessions: [], media: { restored: 0 }, warnings: [] } }));
+  mounted.controller.publish({
+    phase: 'preview',
+    token: 'token-6',
+    mode: 'restore',
+    cwd: 'C:\\work\\x',
+    cwdMode: 'archive',
+    permissionsMode: 'archive',
+    attachWorkspace: false,
+    importMedia: true,
+  });
+  await mounted.controller.commit();
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    token: 'token-6',
+    mode: 'restore',
+    cwd: '',
+    importMedia: true,
+    attachWorkspace: false,
+    permissions: 'keep-archive',
+  });
 });
 
 test('a refused envelope becomes an operator-readable failure', async () => {

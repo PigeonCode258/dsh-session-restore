@@ -8,6 +8,7 @@
  * @module test/helpers
  */
 import { crc32, deflateRawSync } from 'node:zlib';
+import { statSync } from 'node:fs';
 
 /**
  * The platform the suite is being run *as*. `test/simulate-posix/run.mjs`
@@ -15,6 +16,14 @@ import { crc32, deflateRawSync } from 'node:zlib';
  * everywhere else it is simply the host platform.
  */
 export const PLATFORM = process.env.DSH_SESSION_RESTORE_TEST_PLATFORM ?? process.platform;
+
+/**
+ * True when this run simulates a POSIX host on Windows: the simulator switches
+ * the path rules, but a real temp directory keeps the host's spelling, so a
+ * fixture that needs one cannot be absolute in both worlds. A run on a real
+ * POSIX host has no such conflict.
+ */
+export const SIMULATED_POSIX_ON_WINDOWS = process.platform === 'win32' && PLATFORM !== 'win32';
 
 /**
  * A workspace path this platform treats as absolute, so a fixture is valid on
@@ -164,4 +173,134 @@ export function imageBlock(attachmentId, bytes = 3) {
  */
 export function fileBlock(attachmentId, name, bytes) {
   return { type: 'file', attachment: { attachmentId, name, bytes } };
+}
+
+/**
+ * A stand-in for the host workspace registry, recording what a restore asked
+ * of it. Mirrors the three calls the harness itself makes: resolve a path,
+ * create a project, attach a Session.
+ */
+export class FakeWorkspaceRegistry {
+  /**
+   * @param {{ projects?: Array<{ id: string, path: string, title?: string }>, directoryExists?: (path: string) => boolean, attachFails?: boolean }} [options] - initial projects and failure injection.
+   */
+  constructor(options = {}) {
+    this.projects = (options.projects ?? []).map((project) => ({
+      id: project.id,
+      path: project.path,
+      title: project.title ?? project.path,
+      sessionIds: [],
+    }));
+    // The real filesystem by default: the library checks the directory itself
+    // before it registers anything, so a fixture that lies about it would only
+    // test the fixture.
+    this.directoryExists = options.directoryExists ?? ((path) => {
+      try {
+        return statSync(path).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+    this.attachFails = options.attachFails ?? false;
+    this.created = [];
+    this.attached = [];
+    this.resolved = [];
+  }
+
+  /**
+   * Find a project by path, as the harness does.
+   * @param {string} path - candidate directory.
+   * @returns {Promise<object | undefined>} the entity, when one owns the path.
+   */
+  async resolveByPath(path) {
+    this.resolved.push(path);
+    if (!this.directoryExists(path)) throw new Error(`ENOENT: ${path}`);
+    const project = this.projects.find((candidate) => candidate.path === path);
+    return project === undefined ? undefined : this.entity(project);
+  }
+
+  /**
+   * Create a project for a directory, as the harness does.
+   * @param {string} path - directory the project owns.
+   * @param {string} [title] - display title.
+   * @returns {Promise<object>} the new entity.
+   */
+  async create(path, title) {
+    this.created.push(path);
+    if (!this.directoryExists(path)) throw new Error(`cannot create a workspace at '${path}': path is not a directory`);
+    const project = { id: `workspace-${this.projects.length + 1}`, path, title: title ?? path, sessionIds: [] };
+    this.projects.push(project);
+    return this.entity(project);
+  }
+
+  /**
+   * The registry's own listing.
+   * @returns {object[]} project entities.
+   */
+  list() {
+    return this.projects.map((project) => this.entity(project));
+  }
+
+  /**
+   * Wrap one record as an entity with the harness's attach behaviour.
+   * @param {object} project - the record.
+   * @returns {object} the entity.
+   */
+  entity(project) {
+    const registry = this;
+    return {
+      id: project.id,
+      path: project.path,
+      title: project.title,
+      get sessionIds() {
+        return [...project.sessionIds];
+      },
+      async attachSession(sessionId) {
+        if (registry.attachFails) throw new Error(`cannot attach session '${sessionId}' to workspace '${project.path}'`);
+        registry.attached.push({ workspace: project.id, path: project.path, sessionId });
+        if (!project.sessionIds.includes(sessionId)) project.sessionIds.unshift(sessionId);
+      },
+    };
+  }
+}
+
+/**
+ * A stand-in for `dsh-permission-presets`, using the deployment catalog this
+ * machine runs with.
+ */
+export class FakePermissionPresets {
+  /** @param {object} [presets] - preset table. */
+  constructor(presets) {
+    this.presets = presets ?? {
+      'read-only': { sandbox: 'read-only', approval: 'ask' },
+      'workspace-write': { sandbox: 'workspace-write', approval: 'ask' },
+      'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
+    };
+    this.defaultPreset = 'workspace-write';
+  }
+
+  /** @returns {string[]} advertised preset names. */
+  get names() {
+    return Object.keys(this.presets);
+  }
+
+  /**
+   * Resolve one preset's knob bundle.
+   * @param {string} name - preset name.
+   * @returns {{ sandbox: string, approval: string } | undefined} the knobs.
+   */
+  specOf(name) {
+    return this.presets[name];
+  }
+
+  /**
+   * Resolve one preset, throwing for unknown names the way the service does.
+   * @param {string} name - preset name.
+   * @returns {{ sandbox: string, approval: string }} the knobs.
+   */
+  resolve(name) {
+    const spec = this.presets[name];
+    if (spec === undefined) throw new Error(`permission: unknown preset "${name}"`);
+    return spec;
+  }
 }
